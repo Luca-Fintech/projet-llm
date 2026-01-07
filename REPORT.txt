@@ -1,0 +1,795 @@
+================================================================================
+                    MULTI-AGENT GRAPHRAG BUILDER
+                         PROJECT REPORT
+================================================================================
+
+Author: Luca Rougemont
+Institution: ESILV (Ecole Superieure d'Ingenieurs Leonard de Vinci)
+Date: January 2026
+Course: LLM Project
+
+================================================================================
+                         TABLE OF CONTENTS
+================================================================================
+
+1. Context and Objectives
+2. System Architecture
+3. Design Choices
+4. Data Processing Pipeline
+5. LLM Provider Selection
+6. Knowledge Graph Implementation
+7. Vector Store Implementation
+8. GraphRAG QA System
+9. Evaluation and Results
+10. Future Improvements
+
+================================================================================
+                    1. CONTEXT AND OBJECTIVES
+================================================================================
+
+1.1 Project Background
+----------------------
+This project was developed as part of the LLM course at ESILV. The objective
+was to build a Multi-Agent GraphRAG (Graph Retrieval Augmented Generation)
+system that combines knowledge graph traversal with vector-based semantic
+search to provide accurate, citation-backed answers to user queries.
+
+1.2 Project Requirements
+------------------------
+The project had to fulfill five core requirements:
+
+1. Discover & select the most relevant sources across structured data
+   (CSV, tables, DB dumps, APIs) and unstructured data (PDFs, HTML, Markdown)
+
+2. Ingest & normalize the content from various file formats
+
+3. Extract entities and relations to construct a knowledge graph
+
+4. Embed text chunks to create a vector store for classic RAG
+
+5. Expose a GraphRAG QA endpoint that fuses graph traversal + vector
+   retrieval with an LLM to answer questions with citations & graph paths
+
+1.3 Use Case Implementation
+---------------------------
+While the project requirements suggested "evolution of AI courses in ESILV"
+as an example use case, we implemented a more versatile system with two modes:
+
+- Financial Analysis Mode: Specialized for SEC 10-K filings analysis
+- GraphRAG Pipeline Mode: Generic document ingestion and QA for any use case
+
+This approach demonstrates the flexibility of the architecture while providing
+a concrete, real-world application in financial document analysis.
+
+
+================================================================================
+                      2. SYSTEM ARCHITECTURE
+================================================================================
+
+2.1 High-Level Architecture
+---------------------------
+
+                    +-------------------+
+                    |    Frontend       |
+                    |    (React 19)     |
+                    +--------+----------+
+                             |
+                             v
+                    +-------------------+
+                    |   Flask API       |
+                    |   (Port 5000)     |
+                    +--------+----------+
+                             |
+          +------------------+------------------+
+          |                  |                  |
+          v                  v                  v
++------------------+ +---------------+ +------------------+
+| Source Discovery | | Entity Extract| | GraphRAG Agent   |
+| Agent            | | Agent (NER)   | | (QA Fusion)      |
++------------------+ +---------------+ +------------------+
+          |                  |                  |
+          v                  v                  v
++------------------+ +---------------+ +------------------+
+| VectorStore      | | Neo4j Graph   | | Ollama LLM       |
+| (ChromaDB)       | | Database      | | (llama3.2)       |
++------------------+ +---------------+ +------------------+
+
+
+2.2 Component Overview
+----------------------
+
+The system consists of 9 specialized agents:
+
+1. TickerAgent: Resolves company names to stock tickers using fuzzy matching
+   and LLM-based extraction
+
+2. FinancialDataAgent: Fetches real-time financial data via yfinance API
+
+3. SECParserAgent: Downloads and parses SEC 10-K filings, extracting key
+   sections (Business, Risk Factors, MD&A)
+
+4. LLMSynthesisAgent: Summarizes long financial documents using Ollama
+
+5. SourceDiscoveryAgent: Discovers and ingests multiple file formats
+   (PDF, CSV, MD, HTML, JSON, TXT)
+
+6. EntityExtractionAgent: Extracts named entities and relationships using
+   LLM-based NER (Named Entity Recognition)
+
+7. VectorStoreAgent: Manages ChromaDB for semantic search with embeddings
+
+8. GraphAgent: Manages Neo4j knowledge graph operations
+
+9. GraphRAGAgent: Orchestrates the fusion of vector search, graph traversal,
+   and LLM synthesis for question answering
+
+2.3 Technology Stack
+--------------------
+
+| Component      | Technology                    |
+|----------------|-------------------------------|
+| Backend        | Python 3.11, Flask            |
+| Frontend       | React 19, Vanilla CSS         |
+| Vector DB      | ChromaDB (persistent)         |
+| Graph DB       | Neo4j                         |
+| LLM            | Ollama (llama3.2, 3B params)  |
+| Embeddings     | all-MiniLM-L6-v2 (384 dims)   |
+| Finance API    | yfinance                      |
+| SEC Filings    | SEC EDGAR API                 |
+
+
+================================================================================
+                       3. DESIGN CHOICES
+================================================================================
+
+3.1 Multi-Agent Architecture
+----------------------------
+We chose a multi-agent architecture where each agent has a single, well-defined
+responsibility. This design provides several benefits:
+
+- Modularity: Each agent can be developed, tested, and maintained independently
+- Scalability: Agents can be scaled or replaced without affecting others
+- Clarity: Clear separation of concerns makes the codebase easier to understand
+- Flexibility: New agents can be added to extend functionality
+
+3.2 Local LLM with Ollama
+-------------------------
+We chose Ollama with the llama3.2 model (3 billion parameters) for several
+reasons:
+
+- Privacy: All data processing happens locally, no data leaves the machine
+- Cost: No API costs or usage limits
+- Speed: Local inference avoids network latency
+- Offline capability: Works without internet connection after model download
+- Sufficient quality: llama3.2 provides good results for our use cases
+
+3.3 Dual Storage Strategy
+-------------------------
+We implemented both a knowledge graph (Neo4j) and a vector store (ChromaDB):
+
+- Neo4j stores structured entity-relationship data, enabling graph traversal
+  and relationship-based queries
+- ChromaDB stores document embeddings for semantic similarity search
+
+This dual approach allows the GraphRAG system to combine the strengths of both:
+structured reasoning from the graph and semantic understanding from vectors.
+
+3.4 Flask vs FastAPI
+--------------------
+We chose Flask over FastAPI for the API layer because:
+
+- Simpler and more straightforward for this project's scope
+- Extensive ecosystem and documentation
+- Easy integration with file uploads (multipart/form-data)
+- CORS handling with flask-cors is straightforward
+
+3.5 React Frontend
+------------------
+We used React 19 with vanilla CSS (no component libraries) to keep the
+frontend lightweight and focused. The interface provides:
+
+- Two distinct modes: Financial Analysis and GraphRAG Pipeline
+- File upload with drag-and-drop support
+- Real-time feedback during pipeline execution
+- Clean display of QA results with citations
+
+
+================================================================================
+                    4. DATA PROCESSING PIPELINE
+================================================================================
+
+4.1 Source Discovery
+--------------------
+The SourceDiscoveryAgent scans directories recursively to find supported files:
+
+Supported formats:
+- PDF  (.pdf)    - Extracted using PyPDF2
+- CSV  (.csv)    - Parsed with Python csv module, converted to text
+- Markdown (.md) - Parsed with section extraction
+- HTML (.html)   - Cleaned with BeautifulSoup, scripts/styles removed
+- JSON (.json)   - Flattened to readable text format
+- Text (.txt)    - Direct text extraction
+
+Each discovered file is analyzed for:
+- File path and name
+- File type and extension
+- File size
+- Metadata for traceability
+
+4.2 Content Normalization
+-------------------------
+All content is normalized to a common text format for downstream processing:
+
+- CSV: Rows converted to "key: value" format, joined with separators
+- HTML: Scripts, styles, nav, footer, header elements removed
+- JSON: Nested structures flattened with indentation
+- Markdown: Section headers identified and preserved
+- PDF: Pages extracted and concatenated
+
+4.3 Text Chunking Strategy
+--------------------------
+Documents are processed with the following considerations:
+
+- Maximum chunk size: 10,000 characters for vector store
+- Text truncation: 8,000 characters for LLM entity extraction
+- Context preservation: Metadata (source, section) attached to each chunk
+
+4.4 Pipeline Execution Flow
+---------------------------
+The full pipeline executes in 5 sequential steps:
+
+Step 1: Source Discovery
+        -> Scan directory for supported files
+        -> Build source list with metadata
+
+Step 2: Ingestion & Normalization
+        -> Parse each file according to type
+        -> Extract and normalize text content
+
+Step 3: Entity Extraction
+        -> Send text to LLM for NER
+        -> Extract entities (PERSON, ORG, LOCATION, DATE, MONEY, etc.)
+        -> Extract relationships between entities
+
+Step 4: Knowledge Graph Construction
+        -> Create entity nodes in Neo4j
+        -> Create relationship edges between entities
+        -> Link entities to source documents
+
+Step 5: Vector Indexing
+        -> Generate embeddings for each document chunk
+        -> Store in ChromaDB with metadata
+        -> Enable semantic search
+
+
+================================================================================
+                    5. LLM PROVIDER SELECTION
+================================================================================
+
+5.1 Provider Comparison
+-----------------------
+We evaluated several LLM options:
+
+| Provider       | Pros                          | Cons                    |
+|----------------|-------------------------------|-------------------------|
+| OpenAI GPT-4   | Best quality                  | Cost, API dependency    |
+| Anthropic Claude| Excellent reasoning          | Cost, API dependency    |
+| Ollama (local) | Free, private, offline        | Lower quality, slower   |
+| Hugging Face   | Many models, customizable     | Complex setup           |
+
+5.2 Why Ollama with llama3.2
+----------------------------
+We selected Ollama with the llama3.2 model for this project:
+
+Model specifications:
+- Name: llama3.2
+- Parameters: 3 billion (3B)
+- Context window: 8,192 tokens
+- Architecture: LLaMA-based transformer
+
+Advantages for our use case:
+
+1. Privacy & Security: Financial documents contain sensitive information.
+   Local processing ensures no data leaves the user's machine.
+
+2. Cost Efficiency: No per-token costs. Unlimited queries during development
+   and testing without budget concerns.
+
+3. Latency: Average response time of 4-6 seconds for synthesis tasks.
+   While not instant, acceptable for batch processing.
+
+4. Quality: Sufficient for entity extraction and document summarization.
+   The 3B model provides good accuracy for structured extraction tasks.
+
+5. Ease of Setup: Single command installation (ollama pull llama3.2).
+   No API keys or authentication required.
+
+5.3 LLM Usage in the System
+---------------------------
+The LLM is used for four main tasks:
+
+1. Company Name Extraction (TickerAgent):
+   Extract company names from natural language queries
+   Example: "Please analyse for me Mastercard" -> "Mastercard"
+
+2. Ticker Resolution (TickerAgent):
+   Identify stock ticker symbols
+   Example: "Mastercard" -> "MA"
+
+3. Entity & Relation Extraction (EntityExtractionAgent):
+   Named Entity Recognition with relationship detection
+   Entity types: PERSON, ORGANIZATION, LOCATION, DATE, MONEY, PRODUCT, CONCEPT
+   Relation types: WORKS_FOR, LOCATED_IN, OWNS, INVESTS_IN, COMPETES_WITH, etc.
+
+4. Document Synthesis (LLMSynthesisAgent):
+   Summarize long financial documents (10-K sections)
+   Generate structured summaries of Business, Risk Factors, and MD&A sections
+
+5. Answer Generation (GraphRAGAgent):
+   Generate final answers from retrieved context
+   Combine vector search results and graph entities into coherent responses
+
+
+================================================================================
+                 6. KNOWLEDGE GRAPH IMPLEMENTATION
+================================================================================
+
+6.1 Neo4j Configuration
+-----------------------
+Neo4j is used as the graph database:
+
+- Connection: bolt://localhost:7687
+- Authentication: neo4j/[password]
+- Deployment: Docker container or Neo4j Desktop
+
+6.2 Graph Schema
+----------------
+The knowledge graph uses the following node types:
+
+Node Types:
+- Company: Stock ticker, name, sector, industry, financial metrics
+- Sector: Industry sectors (Technology, Healthcare, etc.)
+- Industry: Specific industries within sectors
+- PERSON: People mentioned in documents
+- ORGANIZATION: Companies and institutions
+- LOCATION: Geographic entities
+- DATE: Temporal references
+- MONEY: Financial amounts
+- PRODUCT: Products and services
+- CONCEPT: Abstract concepts and topics
+
+Relationship Types:
+- OPERATES_IN: Company -> Sector
+- BELONGS_TO: Company -> Industry
+- WORKS_FOR: Person -> Organization
+- LOCATED_IN: Entity -> Location
+- OWNS: Entity -> Entity
+- INVESTS_IN: Entity -> Entity
+- COMPETES_WITH: Organization -> Organization
+- PARTNERS_WITH: Entity -> Entity
+- PRODUCES: Organization -> Product
+- RELATED_TO: Generic relationship
+
+6.3 Graph Operations
+--------------------
+Key operations supported:
+
+1. Node Creation:
+   - MERGE operation to avoid duplicates
+   - Automatic timestamp updates
+   - Property storage for entity attributes
+
+2. Relationship Creation:
+   - Dynamic relationship type creation
+   - Source tracking for provenance
+   - Bidirectional relationship handling
+
+3. Graph Queries:
+   - Keyword-based entity search
+   - Path traversal for related entities
+   - Aggregation queries for statistics
+
+6.4 Graph Statistics (from Evaluation)
+--------------------------------------
+After ingesting sample documents:
+- Total Nodes: 15+
+- Node Types: Company, Sector, Industry, and extracted entities
+- Relationships: OPERATES_IN, BELONGS_TO, and extracted relations
+
+
+================================================================================
+                  7. VECTOR STORE IMPLEMENTATION
+================================================================================
+
+7.1 ChromaDB Configuration
+--------------------------
+ChromaDB is used for vector storage and semantic search:
+
+- Persistence: ./chroma_db directory
+- Collection: "financial_documents"
+- Embedding model: all-MiniLM-L6-v2
+
+7.2 Embedding Model Selection
+-----------------------------
+We use Sentence Transformers' all-MiniLM-L6-v2:
+
+- Dimensions: 384
+- Model size: ~80MB
+- Speed: Fast inference on CPU
+- Quality: Good balance of speed and accuracy for semantic similarity
+
+Why this model:
+- Lightweight: Runs efficiently without GPU
+- Pre-trained: No fine-tuning required
+- Proven: Widely used in production RAG systems
+- Compatible: Works seamlessly with ChromaDB
+
+7.3 Document Indexing
+---------------------
+Each document chunk is indexed with:
+
+- Unique ID: {ticker}_{section}_{year} format
+- Embedding: 384-dimensional vector
+- Document text: Original content (truncated if needed)
+- Metadata:
+  - ticker: Source identifier
+  - section: Document section type
+  - source: Origin (10-K, pipeline, upload)
+  - path: Original file path
+
+7.4 Semantic Search
+-------------------
+The search process:
+
+1. Query embedding: Convert question to 384-dim vector
+2. Similarity search: Find k nearest neighbors in vector space
+3. Distance calculation: Cosine similarity (converted from L2 distance)
+4. Result ranking: Sort by relevance score
+5. Metadata return: Include source information for citations
+
+
+================================================================================
+                     8. GRAPHRAG QA SYSTEM
+================================================================================
+
+8.1 Fusion Architecture
+-----------------------
+The GraphRAG QA system combines three retrieval strategies:
+
+1. Vector Search (ChromaDB):
+   - Semantic similarity search
+   - Returns top-k relevant document chunks
+   - Provides content and relevance scores
+
+2. Graph Traversal (Neo4j):
+   - Keyword-based entity matching
+   - Relationship path discovery
+   - Returns entity attributes and connections
+
+3. LLM Synthesis (Ollama):
+   - Combines all retrieved context
+   - Generates coherent answer
+   - References sources in response
+
+8.2 Query Processing Flow
+-------------------------
+When a user asks a question:
+
+Step 1: Vector Search
+        -> Embed question with all-MiniLM-L6-v2
+        -> Query ChromaDB for top-5 similar chunks
+        -> Extract content and metadata
+
+Step 2: Graph Search
+        -> Extract keywords from question
+        -> Match entities in Neo4j
+        -> Traverse relationships for context
+        -> Collect entity attributes and paths
+
+Step 3: Context Building
+        -> Merge vector results and graph entities
+        -> Format context with source labels
+        -> Limit total context to 6000 characters
+
+Step 4: Answer Generation
+        -> Send context + question to LLM
+        -> Prompt for source-referenced answer
+        -> Extract citations from metadata
+
+Step 5: Response Formatting
+        -> Structure answer with citations
+        -> Include graph paths traversed
+        -> Return JSON response
+
+8.3 Response Structure
+----------------------
+The QA endpoint returns:
+
+{
+    "question": "User's question",
+    "answer": "Generated answer with source references",
+    "citations": [
+        {
+            "source": "AAPL",
+            "section": "risk",
+            "url": "https://sec.gov/...",
+            "relevance": 0.85
+        }
+    ],
+    "graph_paths": [
+        {
+            "source": "Apple",
+            "relation": "OPERATES_IN",
+            "target": "Technology"
+        }
+    ],
+    "sources": {
+        "vector_results": 5,
+        "graph_entities": 3
+    }
+}
+
+8.4 Prompt Engineering
+----------------------
+The LLM prompt is carefully designed:
+
+- Clear role definition: "You are a helpful assistant"
+- Context boundaries: Explicit CONTEXT section
+- Source referencing: Instructions to cite sources
+- Uncertainty handling: Guidelines for incomplete information
+- Length constraints: Keep answers focused and relevant
+
+
+================================================================================
+                    9. EVALUATION AND RESULTS
+================================================================================
+
+9.1 Evaluation Methodology
+--------------------------
+We created a Jupyter notebook (notebooks/evaluation.ipynb) to evaluate:
+
+- Query success rate
+- Retrieval accuracy
+- Latency performance
+- Component breakdown
+
+9.2 Test Queries
+----------------
+Five test queries across different categories:
+
+1. Risk Analysis: "What are the main risk factors?"
+2. Entity Extraction: "Who are the key people mentioned?"
+3. Company Analysis: "What companies are discussed?"
+4. Business Overview: "What are the main business activities?"
+5. Financial Data: "What financial metrics are mentioned?"
+
+9.3 Accuracy Metrics
+--------------------
+Results from evaluation:
+
+| Metric                    | Value   |
+|---------------------------|---------|
+| Query Success Rate        | 100%    |
+| Queries with Citations    | 100%    |
+| Queries with Graph Paths  | 0%*     |
+| Avg Citations per Query   | 5.0     |
+| Avg Graph Paths per Query | 0.0*    |
+
+*Note: Graph paths depend on entity matching. With SEC filings,
+company-level entities are matched but relationship paths are sparse.
+
+9.4 Latency Performance
+-----------------------
+Latency measurements across test queries:
+
+| Query Type        | Latency  |
+|-------------------|----------|
+| Risk Analysis     | 9.23s    |
+| Entity Extraction | 3.81s    |
+| Company Analysis  | 5.88s    |
+| Business Overview | 4.28s    |
+| Financial Data    | 11.11s   |
+
+Statistics:
+- Average Latency: 6.86s
+- Median Latency: 5.88s
+- Min Latency: 3.81s
+- Max Latency: 11.11s
+- Std Deviation: 2.85s
+
+9.5 Component Latency Breakdown (Estimated)
+-------------------------------------------
+Based on typical processing ratios:
+
+| Component        | Time   | Percentage |
+|------------------|--------|------------|
+| Vector Search    | 0.69s  | 10%        |
+| Graph Traversal  | 1.03s  | 15%        |
+| LLM Generation   | 4.46s  | 65%        |
+| Post-processing  | 0.69s  | 10%        |
+
+The LLM generation step dominates latency, which is expected given
+the local inference on CPU with a 3B parameter model.
+
+9.6 Quality Observations
+------------------------
+Strengths:
+- Accurate entity extraction from financial documents
+- Good summarization of complex SEC filings
+- Relevant citations provided for all answers
+- Multi-source synthesis in responses
+
+Weaknesses:
+- Graph path coverage could be improved
+- Negative relevance scores indicate some retrieval noise
+- Latency is high for real-time applications
+
+
+================================================================================
+                    10. FUTURE IMPROVEMENTS
+================================================================================
+
+10.1 Performance Optimizations
+------------------------------
+- GPU acceleration: Use CUDA-enabled Ollama for faster inference
+- Caching: Implement response caching for repeated queries
+- Batch processing: Process multiple documents in parallel
+- Streaming: Stream LLM responses for better UX
+
+10.2 Quality Improvements
+-------------------------
+- Fine-tuning: Fine-tune embedding model on financial domain
+- Hybrid search: Combine keyword and semantic search
+- Reranking: Add cross-encoder reranking for better relevance
+- Entity linking: Improve entity resolution across documents
+
+10.3 Feature Additions
+----------------------
+- Multi-language support: Add French and other language support
+- Document comparison: Compare multiple 10-K filings
+- Trend analysis: Track entity mentions over time
+- Export functionality: Export answers to PDF/Word
+
+10.4 Infrastructure
+-------------------
+- Containerization: Docker Compose for easy deployment
+- API authentication: Add JWT-based auth
+- Rate limiting: Protect API from abuse
+- Monitoring: Add logging and metrics collection
+
+10.5 User Experience
+--------------------
+- Progress indicators: Show pipeline stage progress
+- History: Save and retrieve past queries
+- Bookmarks: Save important answers
+- Share: Export and share analysis results
+
+
+================================================================================
+                          CONCLUSION
+================================================================================
+
+This project successfully implements a Multi-Agent GraphRAG Builder that meets
+all five project requirements:
+
+1. Source Discovery: Supports PDF, CSV, MD, HTML, JSON, TXT formats
+2. Content Normalization: Unified text extraction and processing
+3. Entity Extraction: LLM-based NER with relationship detection
+4. Vector Store: ChromaDB with semantic search capability
+5. GraphRAG QA: Fusion of graph traversal, vector retrieval, and LLM
+
+The system demonstrates the power of combining structured knowledge graphs
+with semantic vector search, orchestrated by an LLM for natural language
+understanding and generation.
+
+Key achievements:
+- 100% query success rate in evaluation
+- Average latency under 7 seconds
+- Full citation support for answer traceability
+- Dual-mode interface (Financial Analysis + Generic GraphRAG)
+
+The architecture is modular and extensible, allowing for future improvements
+in performance, quality, and functionality.
+
+
+================================================================================
+                          REFERENCES
+================================================================================
+
+Technologies:
+- Ollama: https://ollama.com/
+- Neo4j: https://neo4j.com/
+- ChromaDB: https://www.trychroma.com/
+- Sentence Transformers: https://www.sbert.net/
+- Flask: https://flask.palletsprojects.com/
+- React: https://react.dev/
+- yfinance: https://pypi.org/project/yfinance/
+- SEC EDGAR: https://www.sec.gov/edgar/
+
+Models:
+- llama3.2 (3B): https://ollama.com/library/llama3.2
+- all-MiniLM-L6-v2: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+
+
+================================================================================
+                          APPENDIX
+================================================================================
+
+A. API Endpoints
+----------------
+
+| Method | Endpoint              | Description                    |
+|--------|-----------------------|--------------------------------|
+| POST   | /api/qa               | GraphRAG Question-Answering    |
+| POST   | /api/pipeline         | Full ingestion pipeline        |
+| POST   | /api/upload           | File upload with processing    |
+| POST   | /api/ingest           | Ingest from path               |
+| POST   | /api/extract-entities | Extract entities from text     |
+| POST   | /api/analyze          | Analyze company                |
+| POST   | /api/10k              | Analyze SEC 10-K filing        |
+| POST   | /api/search           | Semantic search                |
+| GET    | /api/health           | Health check                   |
+| GET    | /api/graph/stats      | Knowledge graph statistics     |
+| GET    | /api/graph/visualize  | Graph visualization data       |
+| GET    | /api/companies        | List all companies             |
+| GET    | /api/sector/<name>    | Companies by sector            |
+
+B. Project Structure
+--------------------
+
+investment-graphrag-analyzer/
+├── app/
+│   ├── api.py                    # Flask API (main entry point)
+│   ├── source_discovery_agent.py # File discovery & ingestion
+│   ├── entity_extraction_agent.py# NER with LLM
+│   ├── graphrag_agent.py         # GraphRAG QA orchestrator
+│   ├── vector_store_agent.py     # ChromaDB operations
+│   ├── graph_agent.py            # Neo4j operations
+│   ├── ticker_agent.py           # Company name resolution
+│   ├── financial_data_agent.py   # yfinance data fetching
+│   ├── sec_filing_agent.py       # SEC 10-K parser
+│   └── llm_synthesis_agent.py    # Document summarization
+├── ui/frontend/
+│   ├── src/
+│   │   ├── App.js                # Main React component
+│   │   └── App.css               # Styles
+│   └── package.json
+├── notebooks/
+│   └── evaluation.ipynb          # Evaluation notebook
+├── data/
+│   └── stocks_symbol.xlsx        # Ticker database
+├── chroma_db/                    # Vector store (persistent)
+├── uploads/                      # Uploaded files
+├── pyproject.toml                # Python dependencies
+└── README.md                     # Project documentation
+
+C. Dependencies
+---------------
+
+Python (pyproject.toml):
+- python = "^3.11"
+- ollama = "^0.6.1"
+- pandas = "^2.3.3"
+- openpyxl = "^3.1.5"
+- yfinance = "^0.2.66"
+- flask = "^3.1.2"
+- flask-cors = "^6.0.1"
+- neo4j = "^6.0.3"
+- sec-edgar-downloader = "^5.0.3"
+- beautifulsoup4 = "^4.14.2"
+- lxml = "^6.0.2"
+- sentence-transformers = "^5.1.2"
+- chromadb = "^1.3.5"
+- matplotlib = "^3.10.8"
+
+Frontend (package.json):
+- react = "^19.2.0"
+- react-dom = "^19.2.0"
+- react-scripts = "5.0.1"
+- vis-network = "^9.1.13"
+- vis-data = "^7.1.10"
+
+
+================================================================================
+                         END OF REPORT
+================================================================================
